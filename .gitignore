@@ -9,3 +9,9 @@ faiss_index/
 *.pyo
 *.pyd
 .ipynb_checkpoints
+changes-done.md
+debug_rag.py
+imp_issues.txt
+implementation_plan.md
+logging_library_implementation_plan.md
+project_documentation.md

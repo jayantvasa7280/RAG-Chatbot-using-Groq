@@ -1,0 +1,5 @@
+[server]
+# Disable the file system watcher as a fallback to prevent the
+# torch.classes.__path__ RuntimeError that occurs with PyTorch 2.x + Streamlit.
+# The in-code patch in app.py is the primary fix; this is a safety net.
+fileWatcherType = "none"

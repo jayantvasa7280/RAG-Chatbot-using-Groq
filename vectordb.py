@@ -3,7 +3,7 @@
 import os
 import pandas as pd
 import streamlit as st
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
@@ -21,7 +21,7 @@ INDEX_FOLDER = "faiss_index"
 def get_splitters():
     # Parent chunks (larger context for generation)
     parent_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
+        chunk_size=800,
         chunk_overlap=150,
         separators=["\n\n", "\n", ".", " ", ""]
     )

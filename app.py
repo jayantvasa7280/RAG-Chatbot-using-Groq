@@ -1,14 +1,32 @@
 # app.py
 
+# ── Silence noisy library startup warnings ─────────────────────────────────
+# Must come BEFORE any import that pulls in `transformers` (langchain_huggingface,
+# sentence_transformers, etc.).  The installed transformers version emits a
+# [transformers] Accessing `__path__` warning for every image-processing
+# submodule it lazy-loads (100+ lines per rerun).  We suppress them here.
+import torch
+torch.classes.__path__ = []
+
+import logging
+import os
+logging.getLogger("transformers").setLevel(logging.ERROR)
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+# Re-use the same coloured logger defined inside rag_engine so all terminal
+# output flows through one consistent handler (set up on first import).
+# We reference it by name; the handler is attached when RAGEngine is imported.
+_app_logger = logging.getLogger("rag_pipeline")
+# ───────────────────────────────────────────────────────────────────────────
+
 import streamlit as st
 import uuid
 import time
-import os
 from dotenv import load_dotenv
 
 from langchain_groq import ChatGroq
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from rag_engine import RAGEngine
 import smartllmops
@@ -219,7 +237,9 @@ def get_embeddings():
     )
 
 llm = init_llm(selected_model, groq_api_key)
+_app_logger.info(f"[APP]  LLM ready  —  model={selected_model}")
 embeddings = get_embeddings()
+_app_logger.info("[APP]  Embedding model ready  —  all-MiniLM-L6-v2")
 
 
 # ---------------------------------------------------------
@@ -239,6 +259,10 @@ def get_vector_store(_embeddings, last_updated):
 # Get index update time for caching logic
 index_mtime = os.path.getmtime("faiss_index/index.faiss") if os.path.exists("faiss_index/index.faiss") else 0
 vector_store = get_vector_store(embeddings, index_mtime)
+if vector_store:
+    _app_logger.info("[APP]  FAISS index loaded successfully")
+else:
+    _app_logger.warning("[APP]  FAISS index NOT found — upload and index documents first")
 
 
 # ---------------------------------------------------------
@@ -249,7 +273,11 @@ vector_store = get_vector_store(embeddings, index_mtime)
 def get_rag_engine_v2(model_name, _llm, _vector_store, _tracer):
     if not _vector_store:
         return None
-    return RAGEngine(_llm, _vector_store, tracer=_tracer, k=6, distance_threshold=0.50)
+    # FIX: routing_threshold lowered to 0.15 (was 0.20) so that
+    # moderate cross-encoder scores from real document queries are not
+    # silently dropped as out_of_scope.  distance_threshold kept at 0.25
+    # to preserve context-quality filtering inside retrieve_documents().
+    return RAGEngine(_llm, _vector_store, tracer=_tracer, k=6, distance_threshold=0.50, routing_threshold=0.50)
 
 @st.cache_resource
 def get_sdk_tracer_v2(env, salt="final_reboot_v11"):
@@ -261,6 +289,10 @@ def get_sdk_tracer_v2(env, salt="final_reboot_v11"):
 
 sdk_tracer = get_sdk_tracer_v2("dev")
 rag_engine = get_rag_engine_v2(selected_model, llm, vector_store, sdk_tracer)
+if rag_engine:
+    _app_logger.info("[APP]  RAGEngine ready\n")
+else:
+    _app_logger.warning("[APP]  RAGEngine NOT initialised — vector store missing\n")
 
 
 # ---------------------------------------------------------
@@ -348,6 +380,7 @@ for message in st.session_state.messages:
 
 # 1. Chat Input
 if prompt := st.chat_input("Send prompt..."):
+    _app_logger.info(f"[APP]  New query received  —  session={session_id}  query=\"{prompt}\"")
 
     # 2. Add and display user message
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -362,7 +395,13 @@ if prompt := st.chat_input("Send prompt..."):
         with st.chat_message("assistant"):
             with st.spinner("Processing..."):
                 start_time_ms = int(time.time() * 1000)
-                sdk_tracer.start_trace()
+                # F2 FIX: Explicitly reset ContextVar span accumulators
+                # for this rerun BEFORE the pipeline starts.  Without this
+                # call, Streamlit's thread-per-rerun model can carry stale
+                # _spans_var / _trace_id_var state from a previous thread,
+                # producing hollow or mis-attributed traces.
+                if sdk_tracer:
+                    sdk_tracer.start_trace()
                 result = rag_engine.run(prompt)
                 
                 raw_answer = result.get("output", "Empty signal.")
@@ -397,15 +436,24 @@ if prompt := st.chat_input("Send prompt..."):
                 if not answer and raw_answer:
                     answer = raw_answer.strip()
 
-                # Telemetry via SDK (Self-Assembly Mode)
-                sdk_tracer.export_trace(
-                    result, 
-                    query=prompt, 
-                    session_id=session_id, 
-                    user_id=user_id, 
-                    timestamp=start_time_ms,
-                    rag_docs=result.get("safe_docs")
+                _app_logger.info(
+                    f"[APP]  Query complete  —  "
+                    f"intent={result.get('intent')}  "
+                    f"route={result.get('routing_decision')}  "
+                    f"docs_used={len(result.get('safe_docs', []))}  "
+                    f"answer_len={len(answer)} chars"
                 )
+
+                # Telemetry via SDK (Self-Assembly Mode)
+                if sdk_tracer:
+                    sdk_tracer.export_trace(
+                        result, 
+                        query=prompt, 
+                        session_id=session_id, 
+                        user_id=user_id, 
+                        timestamp=start_time_ms,
+                        rag_docs=result.get("safe_docs")
+                    )
 
             # Display and store
             st.markdown(answer)
